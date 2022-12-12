@@ -28,68 +28,15 @@
 
 static DEFINE_IDA(bnxt_aux_dev_ids);
 
-int bnxt_register_dev(struct bnxt_en_dev *edev,
-		      struct bnxt_ulp_ops *ulp_ops,
-		      void *handle)
-{
-	struct net_device *dev = edev->net;
-	struct bnxt *bp = netdev_priv(dev);
-	unsigned int max_stat_ctxs;
-	struct bnxt_ulp *ulp;
-
-	max_stat_ctxs = bnxt_get_max_func_stat_ctxs(bp);
-	if (max_stat_ctxs <= BNXT_MIN_ROCE_STAT_CTXS ||
-	    bp->cp_nr_rings == max_stat_ctxs)
-		return -ENOMEM;
-
-	ulp = kzalloc(sizeof(*ulp), GFP_KERNEL);
-	if (!ulp)
-		return -ENOMEM;
-
-	edev->ulp_tbl = ulp;
-	ulp->handle = handle;
-	rcu_assign_pointer(ulp->ulp_ops, ulp_ops);
-
-	if (test_bit(BNXT_STATE_OPEN, &bp->state))
-		bnxt_hwrm_vnic_cfg(bp, 0);
-
-	return 0;
-}
-EXPORT_SYMBOL(bnxt_register_dev);
-
-void bnxt_unregister_dev(struct bnxt_en_dev *edev)
-{
-	struct net_device *dev = edev->net;
-	struct bnxt *bp = netdev_priv(dev);
-	struct bnxt_ulp *ulp;
-	int i = 0;
-
-	ulp = edev->ulp_tbl;
-	if (ulp->msix_requested)
-		bnxt_free_msix_vecs(edev);
-
-	if (ulp->max_async_event_id)
-		bnxt_hwrm_func_drv_rgtr(bp, NULL, 0, true);
-
-	RCU_INIT_POINTER(ulp->ulp_ops, NULL);
-	synchronize_rcu();
-	ulp->max_async_event_id = 0;
-	ulp->async_events_bmap = NULL;
-	while (atomic_read(&ulp->ref_count) != 0 && i < 10) {
-		msleep(100);
-		i++;
-	}
-	kfree(ulp);
-	edev->ulp_tbl = NULL;
-	return;
-}
-EXPORT_SYMBOL(bnxt_unregister_dev);
-
 static void bnxt_fill_msix_vecs(struct bnxt *bp, struct bnxt_msix_entry *ent)
 {
 	struct bnxt_en_dev *edev = bp->edev;
 	int num_msix, idx, i;
 
+	if (!edev->ulp_tbl->msix_requested) {
+		netdev_warn(bp->dev, "Requested MSI-X vectors insufficient\n");
+		return;
+	}
 	num_msix = edev->ulp_tbl->msix_requested;
 	idx = edev->ulp_tbl->msix_base;
 	for (i = 0; i < num_msix; i++) {
@@ -105,100 +52,69 @@ static void bnxt_fill_msix_vecs(struct bnxt *bp, struct bnxt_msix_entry *ent)
 	}
 }
 
-int bnxt_req_msix_vecs(struct bnxt_en_dev *edev,
-			      struct bnxt_msix_entry *ent,
-			      int num_msix)
+int bnxt_register_dev(struct bnxt_en_dev *edev,
+		      struct bnxt_ulp_ops *ulp_ops,
+		      void *handle)
 {
 	struct net_device *dev = edev->net;
 	struct bnxt *bp = netdev_priv(dev);
-	struct bnxt_hw_resc *hw_resc;
-	int max_idx, max_cp_rings;
-	int avail_msix, idx;
-	int total_vecs;
-	int rc = 0;
+	unsigned int max_stat_ctxs;
+	struct bnxt_ulp *ulp;
 
-	if (!(bp->flags & BNXT_FLAG_USING_MSIX))
-		return -ENODEV;
-
-	if (edev->ulp_tbl->msix_requested)
-		return -EAGAIN;
-
-	max_cp_rings = bnxt_get_max_func_cp_rings(bp);
-	avail_msix = bnxt_get_avail_msix(bp, num_msix);
-	if (!avail_msix)
+	max_stat_ctxs = bnxt_get_max_func_stat_ctxs(bp);
+	if (max_stat_ctxs <= BNXT_MIN_ROCE_STAT_CTXS ||
+	    bp->cp_nr_rings == max_stat_ctxs)
 		return -ENOMEM;
-	if (avail_msix > num_msix)
-		avail_msix = num_msix;
 
-	if (BNXT_NEW_RM(bp)) {
-		idx = bp->cp_nr_rings;
-	} else {
-		max_idx = min_t(int, bp->total_irqs, max_cp_rings);
-		idx = max_idx - avail_msix;
-	}
+	ulp = edev->ulp_tbl;
+	if (!ulp)
+		return -ENOMEM;
 
-	edev->ulp_tbl->msix_base = idx;
-	edev->ulp_tbl->msix_requested = avail_msix;
-	hw_resc = &bp->hw_resc;
-	total_vecs = idx + avail_msix;
-	rtnl_lock();
-	if (bp->total_irqs < total_vecs ||
-	    (BNXT_NEW_RM(bp) && hw_resc->resv_irqs < total_vecs)) {
-		if (netif_running(dev)) {
-			bnxt_close_nic(bp, true, false);
-			rc = bnxt_open_nic(bp, true, false);
-		} else {
-			rc = bnxt_reserve_rings(bp, true);
-		}
-	}
-	rtnl_unlock();
-	if (rc) {
-		edev->ulp_tbl->msix_requested = 0;
-		return -EAGAIN;
-	}
+	ulp->handle = handle;
+	rcu_assign_pointer(ulp->ulp_ops, ulp_ops);
 
-	if (BNXT_NEW_RM(bp)) {
-		int resv_msix;
+	if (test_bit(BNXT_STATE_OPEN, &bp->state))
+		bnxt_hwrm_vnic_cfg(bp, 0);
 
-		resv_msix = hw_resc->resv_irqs - bp->cp_nr_rings;
-		avail_msix = min_t(int, resv_msix, avail_msix);
-		edev->ulp_tbl->msix_requested = avail_msix;
-	}
-	bnxt_fill_msix_vecs(bp, ent);
+	bnxt_fill_msix_vecs(bp, bp->edev->msix_entries);
 	edev->flags |= BNXT_EN_FLAG_MSIX_REQUESTED;
-	return avail_msix;
+	return 0;
 }
-EXPORT_SYMBOL(bnxt_req_msix_vecs);
+EXPORT_SYMBOL(bnxt_register_dev);
 
-void bnxt_free_msix_vecs(struct bnxt_en_dev *edev)
+void bnxt_unregister_dev(struct bnxt_en_dev *edev)
 {
 	struct net_device *dev = edev->net;
 	struct bnxt *bp = netdev_priv(dev);
+	struct bnxt_ulp *ulp;
+	int i = 0;
 
-	if (!(edev->flags & BNXT_EN_FLAG_MSIX_REQUESTED))
-		return;
+	ulp = edev->ulp_tbl;
+	if (ulp->msix_requested)
+		edev->flags &= ~BNXT_EN_FLAG_MSIX_REQUESTED;
 
-	edev->ulp_tbl->msix_requested = 0;
-	edev->flags &= ~BNXT_EN_FLAG_MSIX_REQUESTED;
-	rtnl_lock();
-	if (netif_running(dev) && !(edev->flags & BNXT_EN_FLAG_ULP_STOPPED)) {
-		bnxt_close_nic(bp, true, false);
-		bnxt_open_nic(bp, true, false);
+	if (ulp->max_async_event_id)
+		bnxt_hwrm_func_drv_rgtr(bp, NULL, 0, true);
+
+	RCU_INIT_POINTER(ulp->ulp_ops, NULL);
+	synchronize_rcu();
+	ulp->max_async_event_id = 0;
+	ulp->async_events_bmap = NULL;
+	while (atomic_read(&ulp->ref_count) != 0 && i < 10) {
+		msleep(100);
+		i++;
 	}
-	rtnl_unlock();
-
 	return;
 }
-EXPORT_SYMBOL(bnxt_free_msix_vecs);
+EXPORT_SYMBOL(bnxt_unregister_dev);
 
 int bnxt_get_ulp_msix_num(struct bnxt *bp)
 {
-	if (bnxt_ulp_registered(bp->edev)) {
-		struct bnxt_en_dev *edev = bp->edev;
+	u32 roce_msix = BNXT_VF(bp) ?
+			BNXT_MAX_VF_ROCE_MSIX : BNXT_MAX_ROCE_MSIX;
 
-		return edev->ulp_tbl->msix_requested;
-	}
-	return 0;
+	return ((bp->flags & BNXT_FLAG_ROCE_CAP) && bp->aux_dev ?
+		min_t(u32, roce_msix, num_online_cpus()) : 0);
 }
 
 int bnxt_get_ulp_msix_base(struct bnxt *bp)
@@ -416,6 +332,8 @@ static void bnxt_aux_dev_release(struct device *dev)
 		container_of(dev, struct bnxt_aux_dev, aux_dev.dev);
 	struct bnxt *bp = netdev_priv(bnxt_adev->edev->net);
 
+	kfree(bnxt_adev->edev->ulp_tbl);
+	bnxt_adev->edev->ulp_tbl = NULL;
 	kfree(bnxt_adev->edev);
 	bnxt_adev->edev = NULL;
 	bp->edev = NULL;
@@ -439,6 +357,8 @@ static void bnxt_set_edev_info(struct bnxt_en_dev *edev, struct bnxt *bp)
 	edev->hw_ring_stats_size = bp->hw_ring_stats_size;
 	edev->pf_port_id = bp->pf.port_id;
 	edev->en_state = bp->state;
+
+	edev->ulp_tbl->msix_requested = bnxt_get_ulp_msix_num(bp);
 }
 
 static int bnxt_rdma_aux_device_add(struct bnxt *bp)
@@ -446,11 +366,20 @@ static int bnxt_rdma_aux_device_add(struct bnxt *bp)
 	struct bnxt_aux_dev *bnxt_adev = bp->aux_dev;
 	struct bnxt_en_dev *edev = bnxt_adev->edev;
 	struct auxiliary_device *aux_dev;
+	struct bnxt_ulp *ulp;
 	int ret;
 
 	edev = kzalloc(sizeof(*edev), GFP_KERNEL);
 	if (!edev)
 		return -ENOMEM;
+
+	ulp = kzalloc(sizeof(*ulp), GFP_KERNEL);
+	if (!ulp) {
+		ret = -ENOMEM;
+		goto free_edev;
+	}
+
+	edev->ulp_tbl = ulp;
 
 	aux_dev = &bnxt_adev->aux_dev;
 	aux_dev->id = bnxt_adev->id;
@@ -464,7 +393,7 @@ static int bnxt_rdma_aux_device_add(struct bnxt *bp)
 
 	ret = auxiliary_device_init(aux_dev);
 	if (ret)
-		goto free_edev;
+		goto free_ulp;
 
 	ret = auxiliary_device_add(aux_dev);
 	if (ret)
@@ -473,6 +402,9 @@ static int bnxt_rdma_aux_device_add(struct bnxt *bp)
 	return 0;
 aux_dev_uninit:
 	auxiliary_device_uninit(aux_dev);
+free_ulp:
+	kfree(ulp);
+	bp->edev->ulp_tbl = NULL;
 free_edev:
 	kfree(edev);
 	bp->edev = NULL;
