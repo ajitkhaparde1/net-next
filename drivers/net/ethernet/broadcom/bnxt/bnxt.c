@@ -13178,7 +13178,6 @@ static void bnxt_remove_one(struct pci_dev *pdev)
 	struct bnxt *bp = netdev_priv(dev);
 
 	bnxt_rdma_aux_device_uninit(bp);
-	bnxt_aux_dev_free(bp);
 
 	if (BNXT_PF(bp))
 		bnxt_sriov_disable(bp);
@@ -13214,6 +13213,7 @@ static void bnxt_remove_one(struct pci_dev *pdev)
 	kfree(bp->rss_indir_tbl);
 	bp->rss_indir_tbl = NULL;
 	bnxt_free_port_stats(bp);
+	bnxt_aux_priv_free(bp);
 	free_netdev(dev);
 }
 

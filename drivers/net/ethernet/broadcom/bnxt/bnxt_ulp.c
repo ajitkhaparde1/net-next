@@ -113,7 +113,7 @@ int bnxt_get_ulp_msix_num(struct bnxt *bp)
 	u32 roce_msix = BNXT_VF(bp) ?
 			BNXT_MAX_VF_ROCE_MSIX : BNXT_MAX_ROCE_MSIX;
 
-	return ((bp->flags & BNXT_FLAG_ROCE_CAP) && bp->aux_dev ?
+	return ((bp->flags & BNXT_FLAG_ROCE_CAP) && bp->aux_priv ?
 		min_t(u32, roce_msix, num_online_cpus()) : 0);
 }
 
@@ -178,7 +178,7 @@ EXPORT_SYMBOL(bnxt_send_msg);
 
 void bnxt_ulp_stop(struct bnxt *bp)
 {
-	struct bnxt_aux_dev *bnxt_aux = bp->aux_dev;
+	struct bnxt_aux_priv *bnxt_aux = bp->aux_priv;
 	struct bnxt_en_dev *edev = bp->edev;
 
 	if (!edev)
@@ -202,7 +202,7 @@ void bnxt_ulp_stop(struct bnxt *bp)
 
 void bnxt_ulp_start(struct bnxt *bp, int err)
 {
-	struct bnxt_aux_dev *bnxt_aux = bp->aux_dev;
+	struct bnxt_aux_priv *bnxt_aux = bp->aux_priv;
 	struct bnxt_en_dev *edev = bp->edev;
 
 	if (!edev)
@@ -298,38 +298,36 @@ int bnxt_register_async_events(struct bnxt_en_dev *edev,
 }
 EXPORT_SYMBOL(bnxt_register_async_events);
 
-void bnxt_aux_dev_free(struct bnxt *bp)
+void bnxt_aux_priv_free(struct bnxt *bp)
 {
-	kfree(bp->aux_dev);
-	bp->aux_dev = NULL;
+	ida_free(&bnxt_aux_dev_ids, bp->aux_priv->id);
+	kfree(bp->aux_priv);
 }
 
-static struct bnxt_aux_dev *bnxt_aux_dev_alloc(struct bnxt *bp)
+static struct bnxt_aux_priv *bnxt_aux_priv_alloc(struct bnxt *bp)
 {
-	return kzalloc(sizeof(struct bnxt_aux_dev), GFP_KERNEL);
+	return kzalloc(sizeof(struct bnxt_aux_priv), GFP_KERNEL);
 }
 
 void bnxt_rdma_aux_device_uninit(struct bnxt *bp)
 {
-	struct bnxt_aux_dev *bnxt_adev;
+	struct bnxt_aux_priv *bnxt_adev;
 	struct auxiliary_device *adev;
 
 	/* Skip if no auxiliary device init was done. */
 	if (!(bp->flags & BNXT_FLAG_ROCE_CAP))
 		return;
 
-	bnxt_adev = bp->aux_dev;
+	bnxt_adev = bp->aux_priv;
 	adev = &bnxt_adev->aux_dev;
 	auxiliary_device_delete(adev);
 	auxiliary_device_uninit(adev);
-	if (bnxt_adev->id >= 0)
-		ida_free(&bnxt_aux_dev_ids, bnxt_adev->id);
 }
 
 static void bnxt_aux_dev_release(struct device *dev)
 {
-	struct bnxt_aux_dev *bnxt_adev =
-		container_of(dev, struct bnxt_aux_dev, aux_dev.dev);
+	struct bnxt_aux_priv *bnxt_adev =
+		container_of(dev, struct bnxt_aux_priv, aux_dev.dev);
 	struct bnxt *bp = netdev_priv(bnxt_adev->edev->net);
 
 	kfree(bnxt_adev->edev->ulp_tbl);
@@ -363,7 +361,7 @@ static void bnxt_set_edev_info(struct bnxt_en_dev *edev, struct bnxt *bp)
 
 static int bnxt_rdma_aux_device_add(struct bnxt *bp)
 {
-	struct bnxt_aux_dev *bnxt_adev = bp->aux_dev;
+	struct bnxt_aux_priv *bnxt_adev = bp->aux_priv;
 	struct bnxt_en_dev *edev = bnxt_adev->edev;
 	struct auxiliary_device *aux_dev;
 	struct bnxt_ulp *ulp;
@@ -419,12 +417,12 @@ void bnxt_rdma_aux_device_init(struct bnxt *bp)
 	if (!(bp->flags & BNXT_FLAG_ROCE_CAP))
 		return;
 
-	bp->aux_dev = bnxt_aux_dev_alloc(bp);
-	if (!bp->aux_dev)
+	bp->aux_priv = bnxt_aux_priv_alloc(bp);
+	if (!bp->aux_priv)
 		goto skip_ida_init;
 
-	bp->aux_dev->id = ida_alloc(&bnxt_aux_dev_ids, GFP_KERNEL);
-	if (bp->aux_dev->id < 0) {
+	bp->aux_priv->id = ida_alloc(&bnxt_aux_dev_ids, GFP_KERNEL);
+	if (bp->aux_priv->id < 0) {
 		netdev_warn(bp->dev,
 			    "ida alloc failed for ROCE auxiliary device\n");
 		goto skip_aux_init;
@@ -440,10 +438,9 @@ void bnxt_rdma_aux_device_init(struct bnxt *bp)
 	return;
 
 aux_add_failed:
-	ida_free(&bnxt_aux_dev_ids, bp->aux_dev->id);
-	bp->aux_dev->id = -1;
+	ida_free(&bnxt_aux_dev_ids, bp->aux_priv->id);
 skip_aux_init:
-	bnxt_aux_dev_free(bp);
+	kfree(bp->aux_priv);
 skip_ida_init:
 	bp->flags &= ~BNXT_FLAG_ROCE_CAP;
 }

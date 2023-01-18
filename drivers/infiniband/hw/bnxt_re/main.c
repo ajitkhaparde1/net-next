@@ -587,7 +587,7 @@ static int bnxt_re_register_ib(struct bnxt_re_dev *rdev)
 	return ib_register_device(ibdev, "bnxt_re%d", &rdev->en_dev->pdev->dev);
 }
 
-static struct bnxt_re_dev *bnxt_re_dev_add(struct bnxt_aux_dev *aux_dev,
+static struct bnxt_re_dev *bnxt_re_dev_add(struct bnxt_aux_priv *aux_dev,
 					   struct bnxt_en_dev *en_dev)
 {
 	struct bnxt_re_dev *rdev;
@@ -1370,8 +1370,8 @@ fail:
 
 static int bnxt_re_add_device(struct auxiliary_device *adev, u8 wqe_mode)
 {
-	struct bnxt_aux_dev *aux_dev =
-		container_of(adev, struct bnxt_aux_dev, aux_dev);
+	struct bnxt_aux_priv *aux_dev =
+		container_of(adev, struct bnxt_aux_priv, aux_dev);
 	struct bnxt_en_dev *en_dev;
 	struct bnxt_re_dev *rdev;
 	int rc = 0;
