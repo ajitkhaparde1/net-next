@@ -13177,9 +13177,10 @@ static void bnxt_remove_one(struct pci_dev *pdev)
 	struct net_device *dev = pci_get_drvdata(pdev);
 	struct bnxt *bp = netdev_priv(dev);
 
-	bnxt_rdma_aux_device_uninit(bp);
 	if (BNXT_PF(bp))
 		bnxt_sriov_disable(bp);
+
+	bnxt_rdma_aux_device_uninit(bp);
 
 	bnxt_ptp_clear(bp);
 	pci_disable_pcie_error_reporting(pdev);
